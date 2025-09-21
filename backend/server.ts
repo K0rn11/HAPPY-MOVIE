@@ -632,12 +632,7 @@ app.post('/api/promotions/apply', async (req, res) => {
   }
 })
 
-/* ================= Start ================= */
-// อย่า listen เมื่ออยู่บน Vercel (Serverless) — ให้ export app แทน
-if (!IS_VERCEL) {
-  app.listen(3001, () => console.log('Auth API on http://localhost:3001'))
-}
-export default app
-
 process.on('SIGINT', async () => { await prisma.$disconnect(); process.exit(0) })
 process.on('SIGTERM', async () => { await prisma.$disconnect(); process.exit(0) })
+
+export default app
