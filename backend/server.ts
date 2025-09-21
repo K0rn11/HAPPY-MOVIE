@@ -9,9 +9,11 @@ import jwt from 'jsonwebtoken'
 import nodemailer from 'nodemailer'
 import QRCode from 'qrcode'
 
+/* ================= App & Prisma ================= */
 const app = express()
 const prisma = new PrismaClient()
 const orm: any = prisma as any // ใช้กรณีมีตาราง/คอลัมน์ที่ client ไม่ได้ generate
+const IS_VERCEL = process.env.VERCEL === '1'
 
 app.set('json replacer', (_key: string, value: any) =>
   typeof value === 'bigint' ? value.toString() : value
@@ -22,11 +24,25 @@ app.set('json replacer', (_key: string, value: any) =>
   return this.toString()
 }
 
-/* ===== CORS สำหรับ dev localhost ===== */
-app.use(cors({ origin: 'http://localhost:5173', credentials: true }))
+/* ================= CORS ================= */
+const allowlist = new Set<string>([
+  'http://localhost:5173',
+  process.env.FRONTEND_ORIGIN || '',   // ใส่ URL ของ frontend ที่ deploy จริง
+].filter(Boolean))
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true) // allow tools/curl
+    cb(null, allowlist.has(origin))
+  },
+  credentials: true
+}))
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'http://localhost:5173')
-  res.header('Access-Control-Allow-Credentials', 'true')
+  const origin = req.headers.origin || ''
+  if (allowlist.has(origin)) {
+    res.header('Access-Control-Allow-Origin', origin)
+    res.header('Access-Control-Allow-Credentials', 'true')
+  }
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
@@ -105,7 +121,6 @@ async function sendTicketEmail(orderId: bigint) {
   })
   if (!order) return
 
-  // เดิมใช้ $queryRaw กับตาราง `order` (มี backtick) → พังบน Postgres
   // เปลี่ยนมาใช้ Prisma ปกติ และกันไว้กรณีบางคอลัมน์ไม่มีใน schema
   let buyerEmail: string | null = null
   let discountAmt = 0
@@ -118,9 +133,7 @@ async function sendTicketEmail(orderId: bigint) {
     buyerEmail = extra?.buyerEmail ?? null
     discountAmt = Number(extra?.discountAmt ?? 0)
     promoCode = extra?.promoCode ?? null
-  } catch {
-    // ถ้าสคีมายังไม่มีคอลัมน์เหล่านี้ ก็ข้ามได้
-  }
+  } catch {}
 
   const recipient = buyerEmail ?? order.user?.email ?? null
   if (!recipient) {
@@ -243,7 +256,6 @@ app.get('/api/users/:email/role', async (req, res) => {
   try {
     const email = String(req.params.email || '').trim()
     if (!email) return res.status(400).json({ ok: false, error: 'Missing email' })
-    // เดิมใช้ $queryRaw + backtick → เปลี่ยนเป็น Prisma ปกติ
     const u = await prisma.user.findUnique({
       where: { email },
       select: { role: true },
@@ -293,11 +305,50 @@ async function canUsePromotion(promoId: bigint, userId?: bigint, email?: string)
   return { ok: true }
 }
 
-/* ================= Admin Promotion APIs ================= */
-app.get('/api/admin/promotions', auth, requireAdmin, async (_req, res) => {
+/* ================= Admin Promotion APIs (รวม usageCount/uniqueUsers) ================= */
+app.get('/api/admin/promotions', auth, requireAdmin, async (req, res) => {
   if (!orm.promotion) return res.json({ ok: false, error: 'Promotions not enabled' })
-  const list = await orm.promotion.findMany({ orderBy: { createdAt: 'desc' } })
-  res.json({ ok: true, promotions: list })
+  try {
+    const status = String(req.query.status || 'ACTIVE').toUpperCase()
+    const where: any = {}
+    if (status === 'ACTIVE') where.active = true
+    else if (status === 'DISABLED') where.active = false
+
+    const list = await orm.promotion.findMany({
+      where,
+      orderBy: { createdAt: 'desc' }
+    })
+
+    if (!orm.promotionredemption) {
+      return res.json({
+        ok: true,
+        promotions: list.map((p: any) => ({ ...p, usageCount: 0, uniqueUsers: 0 })),
+      })
+    }
+
+    const withStats = []
+    for (const p of list) {
+      const usageCount = await orm.promotionredemption.count({
+        where: { promotionId: p.id },
+      })
+      const redemptions = await orm.promotionredemption.findMany({
+        where: { promotionId: p.id },
+        select: { userId: true, email: true },
+      })
+      const uniq = new Set<string>()
+      for (const r of redemptions) {
+        if (r.userId != null) uniq.add(`uid:${String(r.userId)}`)
+        else if (r.email) uniq.add(`email:${r.email.toLowerCase()}`)
+      }
+      const uniqueUsers = uniq.size
+      withStats.push({ ...p, usageCount, uniqueUsers })
+    }
+
+    res.json({ ok: true, promotions: withStats })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
 })
 
 app.post('/api/admin/promotions', auth, requireAdmin, async (req, res) => {
@@ -582,6 +633,11 @@ app.post('/api/promotions/apply', async (req, res) => {
 })
 
 /* ================= Start ================= */
-app.listen(3001, () => console.log('Auth API on http://localhost:3001'))
+// อย่า listen เมื่ออยู่บน Vercel (Serverless) — ให้ export app แทน
+if (!IS_VERCEL) {
+  app.listen(3001, () => console.log('Auth API on http://localhost:3001'))
+}
+export default app
+
 process.on('SIGINT', async () => { await prisma.$disconnect(); process.exit(0) })
 process.on('SIGTERM', async () => { await prisma.$disconnect(); process.exit(0) })
