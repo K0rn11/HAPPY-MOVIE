@@ -20,7 +20,14 @@ model movie {
   rating      String?
   createdAt   DateTime   @default(now())
   showtime    showtime[]
+
+  posterUrl   String?     
+  overview    String?    
+  tmdbId      Int?
+  active      Boolean    @default(true)
 }
+
+@@index([active, createdAt])
 
 model order {
   id          BigInt    @id @default(autoincrement())
@@ -32,21 +39,16 @@ model order {
   paidAt      DateTime?
   createdAt   DateTime  @default(now())
 
-  // ความสัมพันธ์กับรอบฉาย
   showtime   showtime @relation(fields: [showtimeId], references: [id])
   showtimeId BigInt
 
-  // ผู้สั่งซื้อ
   user   user?   @relation(fields: [userId], references: [id])
   userId BigInt?
 
-  // อีเมลผู้ซื้อ (guest ก็เก็บได้)
   buyerEmail String?
 
-  // ตั๋วที่ออกจากคำสั่งซื้อนี้
   tickets ticket[]
 
-  // บันทึกการใช้โปรฯ
   promotionredemption promotionredemption[]
 
   @@index([showtimeId])

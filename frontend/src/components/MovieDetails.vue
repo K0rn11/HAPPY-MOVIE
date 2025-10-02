@@ -16,7 +16,7 @@
           <div class="flex items-start gap-4 p-5 border-b border-zinc-800/60">
             <img
               :src="posterUrl(movie?.poster_path ?? null)"
-              :alt="movie?.title"
+              :alt="movie?.title || 'poster'"
               class="w-24 h-36 rounded-lg object-cover flex-shrink-0"
             />
             <div class="flex-1 min-w-0">
@@ -28,7 +28,7 @@
             </div>
           </div>
 
-          <!-- ถ้ายังไม่ล็อกอิน: แสดงแบบเดียวกับ MyTickets -->
+          <!-- ถ้ายังไม่ได้ล็อกอิน: แสดงแบบเดียวกับ MyTicket -->
           <div v-if="!loggedIn" class="flex flex-col items-center justify-center text-center py-16">
             <div class="text-3xl mb-2">🔐</div>
             <div class="text-lg font-semibold mb-1">กรุณาเข้าสู่ระบบก่อน</div>
@@ -140,8 +140,11 @@ const emit = defineEmits<{ (e:"close"): void; (e:"book", p:{date:string; time:st
 
 /* Images */
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
+/** รองรับทั้ง URL เต็ม (http/https) และ TMDB path (/xxx.jpg) */
 function posterUrl(p: string | null) {
-  return p ? IMAGE_BASE_URL + p : "https://placehold.co/400x600?text=No+Image";
+  if (!p) return "https://placehold.co/400x600?text=No+Image";
+  if (/^https?:\/\//i.test(p)) return p;        // กรณีหนังจากแอดมินเพิ่ม (URL เต็ม)
+  return IMAGE_BASE_URL + p;                     // กรณี TMDB
 }
 
 /* keep constants */
@@ -150,8 +153,11 @@ const TIME_SLOTS = TIME_SLOTS_LIB;
 
 /* keep function names but delegate */
 function buildDays(n = NEXT_DAYS) { return buildDaysLib(n); }
-function mulberry32(seed:number){ return () => 0; } // legacy keep
-function availableTimesFor(dateStr:string){ return availableTimesForLib(props.movie?.id ?? null, dateStr); }
+// legacy keep (บางไฟล์ import ไว้แล้ว)
+function mulberry32(_seed:number){ return () => 0; }
+function availableTimesFor(dateStr:string){
+  return availableTimesForLib(props.movie?.id ?? null, dateStr);
+}
 
 /* days & schedule */
 const days = ref<string[]>(buildDays(NEXT_DAYS));
@@ -175,20 +181,30 @@ function onPickTime(t:string){ if (timeEnabled(t)) selectedTime.value = t; }
 /* booking modal control */
 const bookingOpen = ref(false);
 function openBooking(){ bookingOpen.value = true; }
-function onBookingConfirm(p:{date:string; time:string}){ bookingOpen.value = false; emit("book", p); }
+function onBookingConfirm(p:{date:string; time:string}){
+  bookingOpen.value = false;
+  emit("book", p);
+}
 
 /* display helpers */
 function formatDayOfWeek(d:string){ return formatDayOfWeekLib(d); }
 function formatMD(d:string){ return formatMDLib(d); }
 function formatFull(d:string){ return formatFullLib(d); }
 
-/* reset when open/movie changes */
-watch(() => [props.open, props.movie?.id], () => {
-  if (!props.open) return;
-  days.value = buildDays(NEXT_DAYS);
-  selectedDate.value = days.value[0] || "";
-  selectedTime.value = "";
-}, { immediate: true });
+/* reset เมื่อเปิด overlay ใหม่ หรือเปลี่ยนหนัง */
+watch(
+  () => [props.open, props.movie?.id],
+  () => {
+    if (!props.open) {
+      bookingOpen.value = false;    // ป้องกัน modal ค้าง
+      return;
+    }
+    days.value = buildDays(NEXT_DAYS);
+    selectedDate.value = days.value[0] || "";
+    selectedTime.value = "";
+  },
+  { immediate: true }
+);
 </script>
 
 <style scoped>

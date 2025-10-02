@@ -9,25 +9,22 @@ import jwt from 'jsonwebtoken'
 import nodemailer from 'nodemailer'
 import QRCode from 'qrcode'
 
-/* ================= App & Prisma ================= */
 const app = express()
 const prisma = new PrismaClient()
-const orm: any = prisma as any // ใช้กรณีมีตาราง/คอลัมน์ที่ client ไม่ได้ generate
-const IS_VERCEL = process.env.VERCEL === '1'
+const orm: any = prisma as any 
 
 app.set('json replacer', (_key: string, value: any) =>
   typeof value === 'bigint' ? value.toString() : value
 )
 
-// @ts-ignore – สำหรับแปลง BigInt -> JSON
 ;(BigInt.prototype as any).toJSON = function () {
   return this.toString()
 }
 
-/* ================= CORS ================= */
 const allowlist = new Set<string>([
   'http://localhost:5173',
-  process.env.FRONTEND_ORIGIN || '',   // ใส่ URL ของ frontend ที่ deploy จริง
+  'https://<GORN>.vercel.app',
+  process.env.FRONTEND_ORIGIN || '',
 ].filter(Boolean))
 
 app.use(cors({
@@ -58,7 +55,6 @@ function signToken(payload: object) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' })
 }
 
-// ตั้งค่า req.user แบบ type-safe (ไม่ชนกับ Express runtime)
 function auth(req: Request & { user?: JwtUser }, res: Response, next: NextFunction) {
   try {
     const h = req.headers.authorization || ''
@@ -72,8 +68,7 @@ function auth(req: Request & { user?: JwtUser }, res: Response, next: NextFuncti
   }
 }
 
-/* ================= Role helpers (PG-safe) ================= */
-// เดิมใช้ $queryRaw + backtick (syntax MySQL) -> พังบน Postgres
+/* ================= Role helpers ================= */
 async function getUserRoleById(id: bigint): Promise<string | null> {
   const u = await prisma.user.findUnique({
     where: { id },
@@ -121,7 +116,6 @@ async function sendTicketEmail(orderId: bigint) {
   })
   if (!order) return
 
-  // เปลี่ยนมาใช้ Prisma ปกติ และกันไว้กรณีบางคอลัมน์ไม่มีใน schema
   let buyerEmail: string | null = null
   let discountAmt = 0
   let promoCode: string | null = null
@@ -133,7 +127,8 @@ async function sendTicketEmail(orderId: bigint) {
     buyerEmail = extra?.buyerEmail ?? null
     discountAmt = Number(extra?.discountAmt ?? 0)
     promoCode = extra?.promoCode ?? null
-  } catch {}
+  } catch {
+  }
 
   const recipient = buyerEmail ?? order.user?.email ?? null
   if (!recipient) {
@@ -216,7 +211,7 @@ app.post('/api/auth/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10)
     const user = await prisma.user.create({ data: { email, passwordHash, displayName } })
 
-    const role = await getUserRoleById(user.id) // เผื่อมี role ใน DB
+    const role = await getUserRoleById(user.id) 
     const publicUser = { id: Number(user.id), email: user.email, displayName: user.displayName ?? null, role: role ?? 'USER' }
     const token = signToken({ uid: publicUser.id, email: publicUser.email, role: publicUser.role })
     res.json({ ok: true, token, user: publicUser })
@@ -239,7 +234,6 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (e: any) { console.error(e); res.status(500).json({ ok: false, error: e.message }) }
 })
 
-/* ===== helper endpoints ให้ Navbar ตรวจ role ได้แน่นอน ===== */
 app.get('/api/auth/me', auth, async (req: Request & { user?: JwtUser }, res) => {
   try {
     const id = BigInt(req.user!.uid)
@@ -266,7 +260,7 @@ app.get('/api/users/:email/role', async (req, res) => {
   }
 })
 
-/* ================= Promotion helpers (รองรับ/ไม่รองรับก็ได้) ================= */
+/* ================= Promotion helpers ================= */
 function normalizeCode(s?: string) { return (s || '').trim().toUpperCase() }
 
 async function computeDiscount(
@@ -305,7 +299,7 @@ async function canUsePromotion(promoId: bigint, userId?: bigint, email?: string)
   return { ok: true }
 }
 
-/* ================= Admin Promotion APIs (รวม usageCount/uniqueUsers) ================= */
+/* ================= Admin Promotion APIs ================= */
 app.get('/api/admin/promotions', auth, requireAdmin, async (req, res) => {
   if (!orm.promotion) return res.json({ ok: false, error: 'Promotions not enabled' })
   try {
@@ -350,6 +344,8 @@ app.get('/api/admin/promotions', auth, requireAdmin, async (req, res) => {
     res.status(500).json({ ok: false, error: e.message })
   }
 })
+
+
 
 app.post('/api/admin/promotions', auth, requireAdmin, async (req, res) => {
   if (!orm.promotion) return res.json({ ok: false, error: 'Promotions not enabled' })
@@ -419,7 +415,7 @@ app.get('/api/promotions/preview', async (req, res) => {
   } catch (e: any) { console.error(e); res.status(500).json({ ok: false, error: e.message }) }
 })
 
-/* ================= Confirm Payment (รองรับ promoCode/fallback) ================= */
+/* ================= Confirm Payment  ================= */
 app.post('/api/payments/confirm', async (req, res) => {
   try {
     const { refCode, email, showtimeId, seats, pricePerSeat, promoCode } = req.body as {
@@ -482,7 +478,6 @@ app.post('/api/payments/confirm', async (req, res) => {
       try {
         order = await prisma.order.create({ data: promoObj ? dataWithPromo : baseData })
       } catch {
-        // ถ้าสคีมาไม่มี discountAmt/promoCode
         order = await prisma.order.create({ data: baseData })
       }
 
@@ -490,7 +485,6 @@ app.post('/api/payments/confirm', async (req, res) => {
         data: seats.map(seat => ({ orderId: order!.id, seatLabel: seat, price: pps })),
       })
 
-      // ลบ seat lock (รองรับชื่อโมเดล seatlock/seatLock)
       const seatLockModel = orm.seatlock ?? orm.seatLock
       if (seatLockModel) {
         await seatLockModel.deleteMany({
@@ -632,7 +626,166 @@ app.post('/api/promotions/apply', async (req, res) => {
   }
 })
 
+
+/* ================= Public Movies  ================= */
+// GET /api/movies?active=true|false (default true)
+app.get('/api/movies', async (req, res) => {
+  try {
+    const onlyActive = String(req.query.active ?? 'true') !== 'false';
+    const where: any = onlyActive ? { active: true } : {};
+    const list = await prisma.movie.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true, title: true, durationMin: true, rating: true,
+        posterUrl: true, overview: true, active: true, createdAt: true
+      }
+    });
+
+app.get('/api/movies/public', async (req, res) => {
+  try {
+    const onlyActive = String(req.query.active ?? 'true') !== 'false';
+    const where: any = onlyActive ? { active: true } : {};
+    const list = await prisma.movie.findMany({
+      where,
+      orderBy: [
+        { createdAt: 'desc' },
+        { id: 'desc' }
+      ],
+      select: {
+        id: true, title: true, durationMin: true, rating: true,
+        posterUrl: true, overview: true, active: true, createdAt: true
+      }
+    });
+    res.json({ ok: true, movies: list.map(m => ({ ...m, id: Number(m.id) })) });
+  } catch (e:any) { console.error(e); res.status(500).json({ ok:false, error: e.message }); }
+});
+
+    res.json({ ok: true, movies: list.map(m => ({ ...m, id: Number(m.id) })) });
+  } catch (e:any) { console.error(e); res.status(500).json({ ok:false, error: e.message }); }
+});
+
+/* ================= Admin Movies  ================= */
+app.get('/api/admin/movies', auth, requireAdmin, async (_req, res) => {
+  try {
+    const movies = await prisma.movie.findMany({
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    const normalized = movies.map(m => ({ ...m, active: m.active !== false }))
+    res.json({ ok: true, movies: normalized })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+// POST /api/admin/movies
+app.post('/api/admin/movies', auth, requireAdmin, async (req, res) => {
+  try {
+    const { title, durationMin, rating, posterUrl, overview, active } = req.body as any
+    if (!title) return res.status(400).json({ ok: false, error: 'กรอกชื่อเรื่องก่อน' })
+    if (!Number(durationMin)) return res.status(400).json({ ok: false, error: 'เวลาความยาวไม่ถูกต้อง' })
+
+    const created = await prisma.movie.create({
+      data: {
+        title: String(title).trim(),
+        durationMin: Number(durationMin),
+        rating: rating ?? null,
+        posterUrl: posterUrl ?? null,
+        overview: overview ?? null,
+        active: active === false ? false : true,
+      },
+    })
+    res.json({ ok: true, movie: created })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+app.patch('/api/admin/movies/:id', auth, requireAdmin, async (req, res) => {
+  try {
+    const id = BigInt(req.params.id)
+    const data: any = { ...req.body }
+    if (data.title != null) data.title = String(data.title).trim()
+    if (data.durationMin != null) data.durationMin = Number(data.durationMin)
+    if (data.rating === '') data.rating = null
+    if (data.posterUrl === '') data.posterUrl = null
+    if (data.overview === '') data.overview = null
+    if (data.active == null) {
+      delete data.active
+    } else {
+      data.active = !!data.active
+    }
+
+    const updated = await prisma.movie.update({ where: { id }, data })
+    res.json({ ok: true, movie: updated })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+app.post('/api/admin/movies/:id/toggle', auth, requireAdmin, async (req,res)=>{
+  try {
+    const id = BigInt(req.params.id)
+    const m = await prisma.movie.findUnique({ where:{ id }, select:{ active:true }})
+    if (!m) return res.status(404).json({ ok:false, error:'Not found' })
+    const updated = await prisma.movie.update({
+      where:{ id }, data:{ active: !m.active }
+    })
+    return res.json({ ok:true, movie: updated })
+  } catch (e:any) {
+    console.error('[admin/movies] toggle error:', e)
+    return res.status(500).json({ ok:false, error:e.message })
+  }
+})
+
+app.delete('/api/admin/movies/:id', auth, requireAdmin, async (req, res) => {
+  try {
+    const id = BigInt(req.params.id)
+    await prisma.movie.update({ where: { id }, data: { active: false } })
+    res.json({ ok: true })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+app.get('/api/movies', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim()
+    const take = Math.max(1, Math.min(100, Number(req.query.limit || 50)))
+
+    const where: any = { active: true }
+    if (q) {
+      where.OR = [
+        { title:  { contains: q, mode: 'insensitive' } },
+        { rating: { contains: q, mode: 'insensitive' } },
+      ]
+    }
+
+    const movies = await prisma.movie.findMany({
+      where,
+      take,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true, title: true, durationMin: true, rating: true,
+        posterUrl: true, overview: true, active: true, createdAt: true,
+      },
+    })
+
+    const normalized = movies.map(m => ({ ...m, active: m.active !== false }))
+    res.json({ ok: true, movies: normalized })
+  } catch (e: any) {
+    console.error(e)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+
+
+/* ================= Start ================= */
+app.listen(3001, () => console.log('Auth API on http://localhost:3001'))
 process.on('SIGINT', async () => { await prisma.$disconnect(); process.exit(0) })
 process.on('SIGTERM', async () => { await prisma.$disconnect(); process.exit(0) })
-
-export default app

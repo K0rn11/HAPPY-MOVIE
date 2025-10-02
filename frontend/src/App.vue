@@ -1,6 +1,5 @@
-<!-- App.vue -->
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import axios from "axios";
 import Navbar from "@/components/Navbar.vue";
 import MyTicket from "@/components/MyTicket.vue";
@@ -11,6 +10,21 @@ import AdminPromotions from "@/components/AdminPromotions.vue";
 import Login from "@/components/Login.vue";
 import Signup from "@/components/Signup.vue";
 import { isLoggedIn } from "@/store/store";
+import TopAdvertisement from "./components/TopAdvertisement.vue";
+
+/* ---------- Config & Types ---------- */
+const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
+const API_KEY  = (import.meta as any).env?.VITE_TMDB_API_KEY || "745ee4aac9395b951f5dfbd7b2e8758c";
+const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:3001";
+
+type Movie = {
+  id: number;
+  title: string;
+  overview: string;
+  poster_path: string | null;
+  createdAt?: string;
+  posterUrl?: string | null;
+};
 
 /* ---------- overlay states ---------- */
 const myTicketOpen = ref(false);
@@ -32,32 +46,26 @@ const onCloseAllOverlays = () => {
   showSeatSelector.value = false;
 };
 
-onMounted(() => {
-  window.addEventListener("open-overlay", onOpenOverlay as EventListener);
-  window.addEventListener("close-all-overlays", onCloseAllOverlays as EventListener);
-});
-onBeforeUnmount(() => {
-  window.removeEventListener("open-overlay", onOpenOverlay as EventListener);
-  window.removeEventListener("close-all-overlays", onCloseAllOverlays as EventListener);
-});
+/* ---------- Home: Now Playing (TMDB + Local first) ---------- */
+const movies = ref<Movie[]>([]);           // TMDB
+const localMoviesHome = ref<Movie[]>([]);  // Local (admin)
+const moviesHome = computed<Movie[]>(() => [
+  ...localMoviesHome.value,                // ✅ Local มาก่อนเสมอ
+  ...movies.value,
+]);
 
-/* ---------- Now Playing (home) ---------- */
-type Movie = { id:number; title:string; overview:string; poster_path:string|null };
-
-const movies = ref<Movie[]>([]);
-const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
-const API_KEY  = (import.meta as any).env?.VITE_TMDB_API_KEY || "745ee4aac9395b951f5dfbd7b2e8758c";
-const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:3001";
-
-const posterUrl = (p: string | null): string =>
-  p ? IMAGE_BASE_URL + p : "https://placehold.co/400x600?text=No+Image";
-
+const posterUrl = (p: string | null): string => {
+  if (!p) return "https://placehold.co/400x600?text=No+Image";
+  return p.startsWith("http") ? p : (IMAGE_BASE_URL + p);
+};
 const truncate = (text = "", len = 100): string =>
   text.length > len ? text.slice(0, len) + "..." : text;
 
 const fetchNowPlaying = async (): Promise<void> => {
   try {
-    const res = await fetch(`https://api.themoviedb.org/3/movie/now_playing?api_key=${API_KEY}&language=en-US&page=1`);
+    const res = await fetch(
+      `https://api.themoviedb.org/3/movie/now_playing?api_key=${API_KEY}&language=en-US&page=1`
+    );
     const data = await res.json();
     movies.value = (data?.results || []).map((m: any) => ({
       id: m.id,
@@ -69,12 +77,107 @@ const fetchNowPlaying = async (): Promise<void> => {
     console.error(e);
   }
 };
-onMounted(fetchNowPlaying);
+
+const fetchLocalMoviesHome = async (): Promise<void> => {
+  try {
+    const res = await fetch(`${API_BASE}/api/movies?active=true`, {
+      headers: { accept: "application/json" },
+      // cache bust (กัน proxy/browser ค้าง)
+      cache: "no-store",
+    });
+    const data = await res.json();
+    let arr = Array.isArray(data?.movies) ? data.movies : [];
+    arr = arr
+      .map((m: any) => ({
+        id: Number(m.id),
+        title: m.title,
+        overview: m.overview || "",
+        poster_path: m.posterUrl || null,
+        createdAt: m.createdAt,
+      }))
+      .sort(
+        (a: any, b: any) =>
+          new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+    localMoviesHome.value = arr;
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+/* ---- refresh helpers ---- */
+function refreshLocalMovies() {
+  fetchLocalMoviesHome();
+}
+function onMoviesChanged() {
+  refreshLocalMovies();
+}
+function onVisibility() {
+  if (!document.hidden) refreshLocalMovies();
+}
+
+/* ---- cross-tab / cross-window channel ---- */
+let bc: BroadcastChannel | null = null;
+function setupBroadcastChannel() {
+  try {
+    bc = new BroadcastChannel("admin-updates");
+    bc.onmessage = (e) => {
+      if (!e?.data) return;
+      if (e.data === "movies") refreshLocalMovies();
+    };
+  } catch {
+    // บราวเซอร์เก่าที่ไม่รองรับ BroadcastChannel จะเงียบๆ ไว้
+  }
+}
+
+/* ---- polling กันเหนียว (เผื่อแอดมินหน้าอื่นไม่ยิง event) ---- */
+let pollTimer: number | undefined;
+
+/* mount + global overlay listeners */
+onMounted(() => {
+  fetchNowPlaying();
+  refreshLocalMovies();
+
+  window.addEventListener("open-overlay", onOpenOverlay as EventListener);
+  window.addEventListener("close-all-overlays", onCloseAllOverlays as EventListener);
+
+  // 1) CustomEvent ภายในหน้า
+  window.addEventListener("movies-changed", onMoviesChanged as EventListener);
+
+  // 2) focus กลับมา
+  document.addEventListener("visibilitychange", onVisibility);
+
+  // 3) storage (จากการ setItem ในหน้าผู้ดูแล หรืออีกแท็บ)
+  window.addEventListener("storage", (e: StorageEvent) => {
+    if (e.key === "movies:updated") refreshLocalMovies();
+  });
+
+  // 4) BroadcastChannel
+  setupBroadcastChannel();
+
+  // 5) Poll ทุก 15s กันพลาด
+  pollTimer = window.setInterval(refreshLocalMovies, 15000);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("open-overlay", onOpenOverlay as EventListener);
+  window.removeEventListener("close-all-overlays", onCloseAllOverlays as EventListener);
+  window.removeEventListener("movies-changed", onMoviesChanged as EventListener);
+  document.removeEventListener("visibilitychange", onVisibility);
+  if (pollTimer) clearInterval(pollTimer);
+  try { bc?.close(); } catch {}
+});
+
+/* ถ้าปิดหน้า Admin ใดๆ แล้ว ให้รีเฟรช */
+watch(adminOpen, (v, prev) => {
+  if (prev === true && v === false) {
+    refreshLocalMovies();
+  }
+});
 
 /* ---------- Details overlay ---------- */
 const detailsOpen  = ref(false);
 const detailsMovie = ref<Movie | null>(null);
-
 const openDetails  = (m: Movie) => { detailsMovie.value = m; detailsOpen.value = true; };
 const closeDetails = () => { detailsOpen.value = false; detailsMovie.value = null; };
 
@@ -112,7 +215,6 @@ const requireLoginThen = (payload: {date:string; time:string}) => {
   }
   return true;
 };
-
 watch(isLoggedIn, async (v) => {
   if (v && loginNeededOpen.value && pendingBooking.value && detailsMovie.value) {
     const payload = pendingBooking.value;
@@ -171,13 +273,15 @@ const onSeatCancel = () => {
       @open-support="supportOpen = true"
     />
 
+    <TopAdvertisement />
+
     <!-- Home: Now Playing -->
     <section class="container lg:w-[75%] py-10">
       <h2 class="text-2xl font-bold mb-4">Now Playing</h2>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <div
-          v-for="m in movies" :key="m.id"
+          v-for="m in moviesHome" :key="m.id"
           class="rounded-xl overflow-hidden bg-muted/60 dark:bg-card flex flex-col"
         >
           <img :src="posterUrl(m.poster_path)" :alt="m.title" class="w-full aspect-[2/3] object-cover" loading="lazy" />

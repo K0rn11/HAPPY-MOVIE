@@ -16,7 +16,30 @@ const API_KEY =
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500";
 
 /* API base */
-const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? "http://localhost:3001";
+const API_BASE = (import.meta as any).env?.VITE_API_BASE ?? 'http://localhost:3001'
+
+/* local admin movies */
+const localMoviesTop = ref<any[]>([])
+const localLoading = ref(false)
+const localError = ref<string>('')
+
+async function fetchLocalMoviesTop() {
+  localLoading.value = true
+  localError.value = ''
+  try {
+    const { data } = await axios.get(`${API_BASE}/api/movies?active=true`)
+    const arr = (data?.movies ?? [])
+      .filter((m: any) => m.active !== false)
+      .map((m: any) => ({ ...m, poster_path: m.posterUrl || null }))
+      .sort((a:any,b:any)=> new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+
+    localMoviesTop.value = arr
+  } catch (e: any) {
+    localError.value = e?.response?.data?.error || e.message || 'โหลดหนังภายในไม่สำเร็จ'
+  } finally {
+    localLoading.value = false
+  }
+}
 
 /* state */
 type TMDBMovie = {
@@ -41,19 +64,15 @@ const page = ref(1);
 const totalPages = ref(1);
 const mode = computed(() => (search.value.trim().length >= 2 ? "search" : "now"));
 
-/* booking flow */
-const showBookingModal = ref(false);
-const showSeatSelector = ref(false);
-const selectedMovie = ref<TMDBMovie | null>(null);
-const selectedDateTime = ref<{ date: string; time: string } | null>(null);
-const currentShowtimeId = ref<number | null>(null);
-
 /* helpers */
 function posterUrl(p: string | null) {
-  return p ? IMAGE_BASE_URL + p : "https://placehold.co/400x600?text=No+Image";
+  if (!p) return "https://placehold.co/400x600?text=No+Image";
+  if (p.startsWith('http')) return p;
+  return IMAGE_BASE_URL + p;
 }
-function truncate(text = "", len = 140) {
-  return text.length > len ? text.slice(0, len) + "..." : text;
+function truncate(text: any, len = 140) {
+  const s = (text ?? '').toString();
+  return s.length > len ? s.slice(0, len) + "..." : s;
 }
 function toISO(dateStr: string, timeStr: string) {
   const m = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -72,16 +91,14 @@ function toISO(dateStr: string, timeStr: string) {
   return new Date(`${dateStr}T${pad(h)}:${pad(mnt)}:00`).toISOString();
 }
 
-/* fetchers */
+/* fetchers (TMDB) */
 async function fetchGenres() {
   try {
     const url = `https://api.themoviedb.org/3/genre/movie/list?api_key=${API_KEY}&language=en-US`;
     const res = await fetch(url);
     const data = await res.json();
     genres.value = data?.genres ?? [];
-  } catch (e) {
-    console.error(e);
-  }
+  } catch (e) { console.error(e); }
 }
 async function fetchMovies(reset = false) {
   loading.value = true;
@@ -131,12 +148,26 @@ function loadMore() {
   }
 }
 
-/* computed */
+/* computed (ที่เดียว) */
 const filteredMovies = computed(() => {
-  let list = movies.value;
-  if (selectedGenre.value) list = list.filter((m) => m.genre_ids?.includes(selectedGenre.value!));
-  return list;
-});
+  const term = (search.value || '').trim().toLowerCase()
+  let tmdb = [...movies.value]
+  if (selectedGenre.value) {
+    tmdb = tmdb.filter((m: any) => Array.isArray(m.genre_ids) && m.genre_ids.includes(selectedGenre.value!))
+  }
+  let list: any[] = [...localMoviesTop.value, ...tmdb]
+  if (term) {
+    list = list.filter((m: any) => (m.title || '').toLowerCase().includes(term))
+  }
+  return list
+})
+
+/* booking flow — ต้องอยู่ก่อน watch ใดๆ ที่อ้างถึงมัน */
+const showBookingModal = ref(false);
+const showSeatSelector = ref(false);
+const selectedMovie = ref<TMDBMovie | null>(null);
+const selectedDateTime = ref<{ date: string; time: string } | null>(null);
+const currentShowtimeId = ref<number | null>(null);
 
 /* effects */
 watch(
@@ -145,6 +176,7 @@ watch(
     if (v) {
       if (!genres.value.length) await fetchGenres();
       if (!movies.value.length) await fetchMovies(true);
+      await fetchLocalMoviesTop();
       document.body.style.overflow = "hidden";
     } else {
       document.body.style.overflow = "";
@@ -158,6 +190,7 @@ watch(
   },
   { immediate: true }
 );
+
 let searchTimer: any = null;
 watch(
   () => search.value,
@@ -203,10 +236,7 @@ async function onDateTimeConfirm(data: { date: string; time: string }) {
     showSeatSelector.value = true;
   } catch (e: any) {
     console.error("ensure showtime failed:", e);
-    alert(
-      "ไม่สามารถสร้าง/ค้นหา Showtime ได้: " +
-        (e?.response?.data?.error || e.message || "Unknown error")
-    );
+    alert("ไม่สามารถสร้าง/ค้นหา Showtime ได้: " + (e?.response?.data?.error || e.message || "Unknown error"));
   }
 }
 
@@ -226,10 +256,9 @@ function onPaidSuccess() {
   currentShowtimeId.value = null;
   emit("close");
 }
-function onOverlayClose() {
-  emit("close");
-}
+function onOverlayClose() { emit("close"); }
 </script>
+
 
 <template>
   <!-- Overlay root -->
@@ -254,7 +283,7 @@ function onOverlayClose() {
             <button class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700" @click="onOverlayClose">ปิด</button>
           </div>
 
-          <!-- Force login (เหมือน MyTickets) -->
+          <!-- Force login -->
           <div v-if="!loggedIn" class="flex flex-col items-center justify-center text-center py-16">
             <div class="text-3xl mb-2">🔐</div>
             <div class="text-lg font-semibold mb-1">กรุณาเข้าสู่ระบบก่อน</div>
@@ -279,8 +308,7 @@ function onOverlayClose() {
                 <option :value="null">All Genres</option>
                 <option v-for="g in genres" :key="g.id" :value="g.id">{{ g.name }}</option>
               </select>
-              <div class="flex items-center justify-between md:justify-end gap-2">
-              </div>
+              <div class="flex items-center justify-between md:justify-end gap-2"></div>
             </div>
 
             <div v-if="errorText" class="mb-3 text-red-300 text-sm">{{ errorText }}</div>
@@ -292,25 +320,34 @@ function onOverlayClose() {
               </template>
               <template v-else>
                 <div
-                  v-for="m in filteredMovies"
-                  :key="m.id"
-                  class="rounded-xl overflow-hidden bg-zinc-800 hover:bg-zinc-700 transition flex flex-col"
-                >
-                  <img :src="posterUrl(m.poster_path)" :alt="m.title" class="w-full aspect-[2/3] object-cover" loading="lazy" />
-                  <div class="p-3 flex-1 flex flex-col">
-                    <div class="font-semibold truncate" :title="m.title">{{ m.title }}</div>
-                    <div class="text-xs opacity-80">
-                      <span v-if="m.release_date">📅 {{ m.release_date }}</span>
-                      <span v-if="m.vote_average">&nbsp;• ⭐ {{ m.vote_average?.toFixed(1) }}</span>
-                    </div>
-                    <p class="mt-1 text-sm opacity-90 leading-snug">{{ truncate(m.overview, 120) }}</p>
-                    <div class="mt-3">
-                      <button class="w-full px-3 py-2 rounded-lg bg-primary/90 hover:bg-primary text-white" @click="startBooking(m)">
-                        Book
-                      </button>
+                    v-for="m in filteredMovies"
+                    :key="m.id"
+                    class="h-full rounded-xl overflow-hidden bg-zinc-800 hover:bg-zinc-700 transition flex flex-col"
+                  >
+                    <img :src="posterUrl(m.poster_path)" :alt="m.title" class="w-full aspect-[2/3] object-cover" loading="lazy" />
+                    <div class="p-3 flex-1 flex flex-col">
+                      <div class="font-semibold truncate" :title="m.title">{{ m.title }}</div>
+                      <div class="text-xs opacity-80">
+                        <span v-if="m.release_date">📅 {{ m.release_date }}</span>
+                        <span v-if="m.vote_average">&nbsp;• ⭐ {{ m.vote_average?.toFixed(1) }}</span>
+                      </div>
+
+                      <!-- ตัด overview ไม่ให้เกิน 3 บรรทัด -->
+                      <p class="mt-1 text-sm opacity-90 leading-snug overview">
+                        {{ truncate(m.overview, 240) }}
+                      </p>
+
+                      <!-- ดันปุ่มไปชิดล่างเสมอ -->
+                      <div class="mt-auto pt-3">
+                        <button
+                          class="w-full px-3 py-2 rounded-lg bg-primary/90 hover:bg-primary text-white"
+                          @click="startBooking(m)"
+                        >
+                          Book
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
               </template>
             </div>
 
@@ -347,14 +384,9 @@ function onOverlayClose() {
 </template>
 
 <style scoped>
-/* --- smooth, production-like transitions (เหมือน Booking/MovieDetails) --- */
-.fade-enter-from,
-.fade-leave-to { opacity: 0 }
-.fade-enter-active,
-.fade-leave-active { transition: opacity .18s ease }
-
+.fade-enter-from, .fade-leave-to { opacity: 0 }
+.fade-enter-active, .fade-leave-active { transition: opacity .18s ease }
 .pop-enter-from   { opacity: 0; transform: translateY(10px) scale(.985) }
 .pop-leave-to     { opacity: 0; transform: translateY(10px) scale(.985) }
-.pop-enter-active,
-.pop-leave-active { transition: transform .22s cubic-bezier(.2,.8,.2,1), opacity .22s }
+.pop-enter-active, .pop-leave-active { transition: transform .22s cubic-bezier(.2,.8,.2,1), opacity .22s }
 </style>

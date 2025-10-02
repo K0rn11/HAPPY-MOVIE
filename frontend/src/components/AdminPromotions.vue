@@ -1,6 +1,6 @@
 <!-- src/components/AdminPromotions.vue -->
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch } from "vue";
 import axios from "axios";
 
 const props = defineProps<{ open: boolean }>();
@@ -46,6 +46,26 @@ const authHeader = computed(() => ({
   headers: { Authorization: `Bearer ${getBearer()}` },
 }));
 
+/* ----------------- 🔔 Broadcaster: แจ้งหน้า Home ให้รีเฟรช Now Playing ----------------- */
+function announceMoviesChanged() {
+  // 1) ในแท็บ/หน้าเดียวกัน
+  try {
+    window.dispatchEvent(new CustomEvent("movies-changed"));
+  } catch {}
+
+  // 2) cross-tab ผ่าน localStorage (storage event ยิงในแท็บอื่น)
+  try {
+    localStorage.setItem("movies:updated", String(Date.now()));
+  } catch {}
+
+  // 3) cross-tab แบบทันทีผ่าน BroadcastChannel
+  try {
+    const bc = new BroadcastChannel("admin-updates");
+    bc.postMessage("movies");
+    bc.close();
+  } catch {}
+}
+
 /* ----------------- List state ----------------- */
 type Promo = {
   id: number;
@@ -59,7 +79,9 @@ type Promo = {
   usageLimit: number | null;
   usagePerUser: number | null;
   active: boolean;
-  createdAt?: string;
+  createdAt?: string | null;
+  usageCount: number;
+  uniqueUsers: number;
 };
 
 const list = ref<Promo[]>([]);
@@ -68,7 +90,7 @@ const errorText = ref("");
 
 /* filters / sort / search / pagination */
 const q = ref("");
-const statusFilter = ref<"ALL" | "ACTIVE" | "DISABLED">("ALL");
+const statusFilter = ref<"ALL" | "ACTIVE" | "DISABLED">("ACTIVE");
 const sortBy = ref<"createdAt" | "code" | "startsAt" | "endsAt">("createdAt");
 const sortDir = ref<"desc" | "asc">("desc");
 const page = ref(1);
@@ -87,6 +109,9 @@ const emptyForm: Promo = {
   usageLimit: null,
   usagePerUser: null,
   active: true,
+  createdAt: null,
+  usageCount: 0,
+  uniqueUsers: 0,
 };
 const form = ref<Promo>({ ...emptyForm });
 const saving = ref(false);
@@ -109,8 +134,11 @@ function mapApiItem(p: any): Promo {
     endsAt: p.endsAt ? new Date(p.endsAt).toISOString() : null,
     usageLimit: p.usageLimit != null ? Number(p.usageLimit) : null,
     usagePerUser: p.usagePerUser != null ? Number(p.usagePerUser) : null,
-    active: !!p.active,
+    // กัน null = active
+    active: p.active !== false,
     createdAt: p.createdAt ? new Date(p.createdAt).toISOString() : null,
+    usageCount: Number(p.usageCount ?? 0),
+    uniqueUsers: Number(p.uniqueUsers ?? 0),
   } as Promo;
 }
 
@@ -122,13 +150,14 @@ async function fetchList() {
   loading.value = true;
   errorText.value = "";
   try {
+    const params = new URLSearchParams({ status: statusFilter.value });
     const { data } = await axios.get(
-      `${API_BASE}/api/admin/promotions`,
+      `${API_BASE}/api/admin/promotions?${params.toString()}`,
       authHeader.value
     );
     if (!data?.ok) throw new Error(data?.error || "Load failed");
     list.value = (data.promotions || []).map(mapApiItem);
-    page.value = 1; // reset paging
+    page.value = 1;
   } catch (e: any) {
     errorText.value =
       e?.response?.data?.error || e.message || "โหลดข้อมูลไม่สำเร็จ";
@@ -159,7 +188,6 @@ const filtered = computed(() => {
     let va: any = (a as any)[key];
     let vb: any = (b as any)[key];
 
-    // ensure comparable
     if (key === "createdAt" || key === "startsAt" || key === "endsAt") {
       va = va ? new Date(va).getTime() : 0;
       vb = vb ? new Date(vb).getTime() : 0;
@@ -223,9 +251,8 @@ watch(
   () => form.value.type,
   (t) => {
     if (t === "PERCENT") {
-      // clamp 1..100
       form.value.value = Math.min(100, Math.max(1, Number(form.value.value || 10)));
-      if (form.value.maxDiscount == null) form.value.maxDiscount = 200; // sensible default
+      if (form.value.maxDiscount == null) form.value.maxDiscount = 200;
     }
   }
 );
@@ -266,6 +293,10 @@ async function save() {
         authHeader.value
       );
     }
+
+    // ✅ แจ้งหน้า Home ว่ามีการเปลี่ยนแปลง (กันเคสที่มีหน้า Now Playing เปิดอยู่)
+    announceMoviesChanged();
+
     await fetchList();
     resetForm();
   } catch (e: any) {
@@ -283,19 +314,34 @@ async function toggleActive(item: Promo) {
       { active: !item.active },
       authHeader.value
     );
+
+    // ✅ แจ้งเปลี่ยนแปลง
+    announceMoviesChanged();
+
     await fetchList();
   } catch (e: any) {
     alert(e?.response?.data?.error || e.message || "อัปเดตไม่สำเร็จ");
   }
 }
+
 async function disableItem(id: number) {
   if (!isAdmin()) return;
   if (!confirm("ปิดใช้งานโปรโมชันนี้?")) return;
   try {
-    await axios.delete(
-      `${API_BASE}/api/admin/promotions/${id}`,
-      authHeader.value
-    );
+    // server จะทำ soft delete = active:false
+    await axios.delete(`${API_BASE}/api/admin/promotions/${id}`, authHeader.value);
+
+    // เอาออกจาก list ในทันที (รู้สึกไวขึ้น)
+    list.value = list.value.filter((x) => x.id !== id);
+
+    // ✅ แจ้งเปลี่ยนแปลง
+    announceMoviesChanged();
+
+    // รีคำนวณหน้าเพจ (กันหน้าเกิน)
+    const maxPage = Math.max(1, Math.ceil(list.value.length / pageSize.value));
+    if (page.value > maxPage) page.value = maxPage;
+
+    // ดึงข้อมูลตาม filter ปัจจุบัน
     await fetchList();
   } catch (e: any) {
     alert(e?.response?.data?.error || e.message || "ปิดใช้งานไม่สำเร็จ");
@@ -330,7 +376,7 @@ async function doPreview() {
   }
 }
 
-/* ----------------- Open/Close watch ----------------- */
+/* ----------------- Open/Close + filter watch ----------------- */
 watch(
   () => props.open,
   (v) => {
@@ -343,6 +389,12 @@ watch(
   },
   { immediate: true }
 );
+
+// เปลี่ยนตัวกรอง → โหลดจากเซิร์ฟเวอร์ใหม่เสมอ
+watch(statusFilter, () => {
+  page.value = 1;
+  fetchList();
+});
 </script>
 
 <template>
@@ -365,7 +417,7 @@ watch(
             <div
               class="w-9 h-9 rounded-xl bg-primary/20 border border-primary/30 grid place-items-center"
             >
-              % 
+              %
             </div>
             <div>
               <h2 class="text-lg font-semibold leading-tight">
@@ -405,9 +457,7 @@ watch(
 
         <div v-else class="px-5 pb-5">
           <!-- Toolbar -->
-          <div
-            class="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3"
-          >
+          <div class="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
             <div class="flex">
               <input
                 v-model="q"
@@ -444,7 +494,7 @@ watch(
                 <option value="asc">⬆️</option>
               </select>
             </div>
-            <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center justify-between gap-2 lg:col-span-2">
               <button
                 class="px-3 py-2 rounded-lg bg-primary/90 hover:bg-primary text-white"
                 @click="resetForm"
@@ -466,9 +516,7 @@ watch(
           <!-- Body: Form + List -->
           <div class="mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
             <!-- Form -->
-            <div
-              class="lg:col-span-1 rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-4"
-            >
+            <div class="lg:col-span-1 rounded-2xl border border-zinc-800/60 bg-zinc-900/50 p-4">
               <div class="font-semibold mb-3">Promotion Editor</div>
 
               <div class="grid grid-cols-1 gap-3">
@@ -495,10 +543,9 @@ watch(
 
                 <div class="grid grid-cols-3 gap-2">
                   <div>
-                    <label class="text-xs text-zinc-400"
-                      >Value <span v-if="form.type==='PERCENT'">(%)</span
-                      ><span v-else>(฿)</span></label
-                    >
+                    <label class="text-xs text-zinc-400">
+                      Value <span v-if="form.type==='PERCENT'">(%)</span><span v-else>(฿)</span>
+                    </label>
                     <input
                       v-model.number="form.value"
                       type="number"
@@ -580,10 +627,8 @@ watch(
                 </label>
 
                 <!-- Preview -->
-                <div
-                  class="mt-1 p-3 rounded-xl bg-zinc-800/40 border border-zinc-700/50"
-                >
-                  <div class="text-xs text-zinc-400 mb-2">
+                <div class="mt-1 p-3 rounded-xl bg-zinc-800/40 border border-zinc-700/50">
+                  <div class="text-xs text-зinc-400 mb-2">
                     พรีวิวส่วนลด (กรอกยอดคำสั่งซื้อ)
                   </div>
                   <div class="flex gap-2">
@@ -602,10 +647,7 @@ watch(
                       {{ previewLoading ? '...' : 'Preview' }}
                     </button>
                   </div>
-                  <div
-                    v-if="previewResult"
-                    class="mt-2 text-sm flex items-center justify-between"
-                  >
+                  <div v-if="previewResult" class="mt-2 text-sm flex items-center justify-between">
                     <div class="text-emerald-300">
                       ส่วนลด: -{{ previewResult.discount.toLocaleString() }} ฿
                     </div>
@@ -635,31 +677,24 @@ watch(
 
             <!-- List -->
             <div class="lg:col-span-2">
-              <div
-                class="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 overflow-hidden"
-              >
+              <div class="rounded-2xl border border-zinc-800/60 bg-zinc-900/50 overflow-hidden">
                 <div class="overflow-x-auto">
                   <table class="w-full text-sm">
-                    <thead
-                      class="text-left text-zinc-400 bg-zinc-900/60 border-b border-zinc-800/60"
-                    >
+                    <thead class="text-left text-zinc-400 bg-zinc-900/60 border-b border-zinc-800/60">
                       <tr>
                         <th class="py-3 px-4">Code</th>
                         <th class="px-2">Type</th>
                         <th class="px-2">Value</th>
                         <th class="px-2">Rules</th>
                         <th class="px-2">Window</th>
+                        <th class="px-2">Usage</th>
                         <th class="px-2">Status</th>
                         <th class="px-2 text-right">Actions</th>
                       </tr>
                     </thead>
 
                     <transition-group tag="tbody" name="list">
-                      <tr
-                        v-for="p in paged"
-                        :key="p.id"
-                        class="border-b border-zinc-800/40"
-                      >
+                      <tr v-for="p in paged" :key="p.id" class="border-b border-зinc-800/40">
                         <td class="py-3 px-4 font-mono">{{ p.code }}</td>
                         <td class="px-2">{{ p.type }}</td>
                         <td class="px-2">
@@ -675,34 +710,29 @@ watch(
                         <td class="px-2 text-xs">
                           <div>
                             <span class="opacity-70">Start:</span>
-                            <span class="ml-1">{{
-                              p.startsAt ? new Date(p.startsAt).toLocaleString() : "-"
-                            }}</span>
+                            <span class="ml-1">{{ p.startsAt ? new Date(p.startsAt).toLocaleString() : "-" }}</span>
                           </div>
                           <div>
                             <span class="opacity-70">End:</span>
-                            <span class="ml-1">{{
-                              p.endsAt ? new Date(p.endsAt).toLocaleString() : "-"
-                            }}</span>
+                            <span class="ml-1">{{ p.endsAt ? new Date(p.endsAt).toLocaleString() : "-" }}</span>
                           </div>
                         </td>
                         <td class="px-2">
-                          <span
-                            :class="p.active ? 'text-emerald-400' : 'text-zinc-400'"
-                            >{{ p.active ? "Active" : "Disabled" }}</span
-                          >
+                          <div class="text-xs">
+                            <div>Used: <span class="font-medium">{{ p.usageCount }}</span></div>
+                            <div class="opacity-80">Users: {{ p.uniqueUsers }}</div>
+                          </div>
+                        </td>
+                        <td class="px-2">
+                          <span :class="p.active ? 'text-emerald-400' : 'text-zinc-400'">
+                            {{ p.active ? "Active" : "Disabled" }}
+                          </span>
                         </td>
                         <td class="px-2 text-right whitespace-nowrap">
-                          <button
-                            class="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 mr-2"
-                            @click="edit(p)"
-                          >
+                          <button class="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 mr-2" @click="edit(p)">
                             Edit
                           </button>
-                          <button
-                            class="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 mr-2"
-                            @click="duplicate(p)"
-                          >
+                          <button class="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 mr-2" @click="duplicate(p)">
                             Duplicate
                           </button>
                           <button
@@ -725,9 +755,7 @@ watch(
                 </div>
 
                 <!-- Paging -->
-                <div
-                  class="flex items-center justify-between px-4 py-3 text-sm"
-                >
+                <div class="flex items-center justify-between px-4 py-3 text-sm">
                   <div class="opacity-70">
                     Page {{ page }} / {{ totalPages }} •
                     {{ filtered.length.toLocaleString() }} items
@@ -741,7 +769,7 @@ watch(
                       Prev
                     </button>
                     <button
-                      class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50"
+                      class="px-3 py-1.5 rounded bg-зinc-800 hover:bg-зinc-700 disabled:opacity-50"
                       :disabled="page>=totalPages"
                       @click="page = Math.min(totalPages, page + 1)"
                     >
@@ -751,12 +779,8 @@ watch(
                 </div>
               </div>
 
-              <div v-if="loading" class="text-center py-4 opacity-70">
-                Loading…
-              </div>
-              <div v-if="errorText" class="mt-3 text-red-300">
-                {{ errorText }}
-              </div>
+              <div v-if="loading" class="text-center py-4 opacity-70">Loading…</div>
+              <div v-if="errorText" class="mt-3 text-red-300">{{ errorText }}</div>
             </div>
           </div>
         </div>
@@ -766,21 +790,18 @@ watch(
 </template>
 
 <style scoped>
-/* -------- production-like transitions -------- */
+/* transitions */
 .fade-enter-from, .fade-leave-to { opacity: 0 }
 .fade-enter-active, .fade-leave-active { transition: opacity .18s ease }
 
-/* modal pop (opacity + scale + slight rise) */
 .pop-enter-from   { opacity: 0; transform: translateY(8px) scale(.98) }
 .pop-leave-to     { opacity: 0; transform: translateY(8px) scale(.98) }
 .pop-enter-active,
 .pop-leave-active { transition: transform .22s cubic-bezier(.2,.8,.2,1), opacity .22s }
 
-/* list rows */
 .list-enter-from, .list-leave-to { opacity: 0; transform: translateY(4px) }
 .list-enter-active, .list-leave-active { transition: all .16s ease }
 .list-move { transition: transform .18s ease }
 
-/* small extras */
 :deep(input[type="checkbox"]) { width: 16px; height: 16px; }
 </style>

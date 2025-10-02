@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useColorMode } from "@vueuse/core";
 import { Menu, Film, Ticket, LifeBuoy, BadgePercent } from "lucide-vue-next";
 import { logoutUser, isLoggedIn } from "@/store/store";
+import AdminMovies from "./AdminMovies.vue";
 
 import {
   NavigationMenu,
@@ -31,6 +32,13 @@ const mode = useColorMode({
   initialValue: "light",
   storageKey: "color-scheme",
 });
+
+const isAdminMoviesOpen = ref(false);
+const openAdminMovies = () => {
+  isOpen.value = false;
+  isAdminMoviesOpen.value = true;
+};
+
 
 /* ====== STATE ====== */
 const isOpen = ref(false);
@@ -233,6 +241,18 @@ onBeforeUnmount(() => {
                   <BadgePercent class="inline-block mr-2 w-4 h-4" /> Admin / Promotions
                 </a>
               </Button>
+
+              <Button
+                v-if="isAdmin"
+                as-child
+                variant="outline"
+                class="justify-start text-base border-primary/40"
+              >
+                <a @click.prevent="openAdminMovies" href="#">
+                  🎬 Admin / Movies
+                </a>
+              </Button>
+
             </div>
           </NavigationMenuLink>
         </NavigationMenuItem>
@@ -251,6 +271,7 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
+    <AdminMovies :open="isAdminMoviesOpen" @close="isAdminMoviesOpen = false" />
     <!-- Movie overlay -->
     <Team :open="isMovieOpen" @close="isMovieOpen = false" />
   </header>
